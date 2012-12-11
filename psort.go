@@ -1,11 +1,18 @@
+// Copyright 2012 The Authors. All rights reserved.
+// Use of this source code is governed by a BSD-style
+// license that can be found in the LICENSE file.
+
 // The psort package implements sorting in parallel to take advantage of multi-core CPUs.
-package psort
+package main
 
 import (
 	"runtime"
 	"sort"
 )
 
+// Do getters and conversions
+// ahead of time if possible
+// to reduce runtime
 var (
 	cpus  = runtime.NumCPU()
 	fcpus = float32(runtime.NumCPU())
@@ -17,8 +24,7 @@ var (
 func Sort(list sort.Interface) {
 	length := list.Len()
 
-	if cpus == 1 {
-		// s(list)
+	if length < 1024 || cpus == 1 {
 		sort.Sort(list)
 		return
 	}
@@ -36,10 +42,7 @@ func Sort(list sort.Interface) {
 
 	for i := 0; i < numLists; i++ {
 		ptrs[i] = i * listSize
-		go func() {
-			sort.Sort(&sortable{list, i * listSize, (i + 1) * listSize})
-			report <- struct{}{}
-		}()
+		go par(i, listSize, list, report)
 	}
 
 	i := 0
@@ -47,31 +50,31 @@ func Sort(list sort.Interface) {
 	// One extra sort routine for cases 
 	// where (length % listSize) != 0
 	if numLists*listSize < length {
-		// // The for loop has to wait for 
-		// // one extra goroutine to halt
-		// i = -1
-		numLists++
 		ptrs = append(ptrs, numLists*listSize)
 		go func() {
-			sort.Sort(&sortable{list, numLists * listSize, length - 1})
+			sort.Sort(&sortable{list, numLists * listSize, length - (numLists * listSize)})
 			report <- struct{}{}
 		}()
+		// The for loop has to wait for 
+		// one extra goroutine to halt
+		numLists++
 	}
 
 	// Wait for all goroutines to finish
 	for ; i < numLists; _, i = <-report, i+1 {
 	}
 
+	// fmt.Println(list)
 
 	// Merge list segments, storing the
 	// order of their values rather than
 	// the values themselves
 	result := make([]int, length)
 	for i := 0; i < length; i++ {
-		j := 1
+		j := 0
 		var smallInd int
 		var smallVal int
-		
+
 		// Find first non-exhausted
 		// list segment
 		for ; ; j++ {
@@ -81,25 +84,39 @@ func Sort(list sort.Interface) {
 				break
 			}
 		}
-		for ; j < listSize; j++ {
+
+		for ; j < numLists; j++ {
 			if ptrs[j] != -1 && list.Less(ptrs[j], smallVal) {
 				smallVal = ptrs[j]
 				smallInd = j
 			}
 		}
-		result[i] = ptrs[j]
-		
+		result[smallVal] = i
+
 		// If the pointer has already incremented
 		// through its entire list segment
-		if ptrs[j] == (i + 1) * listSize - 1 {
-			ptrs[j] = -1
+		if smallVal == (smallInd+1)*listSize-1 || smallVal == length-1 {
+			ptrs[smallInd] = -1
 		} else {
-			ptrs[j]++
+			ptrs[smallInd]++
 		}
 	}
-	
+
 	// Put the list in the order determined above
-	
+	for i := 0; i != length; i++ {
+		for result[i] != i {
+			tmp := result[i]
+			list.Swap(i, tmp)
+			result[i] = result[tmp]
+			result[tmp] = tmp
+		}
+	}
+
+}
+
+func par(i, listSize int, list sort.Interface, report chan struct{}) {
+	sort.Sort(&sortable{list, i * listSize, listSize})
+	report <- struct{}{}
 }
 
 func round32(f float32) int {
